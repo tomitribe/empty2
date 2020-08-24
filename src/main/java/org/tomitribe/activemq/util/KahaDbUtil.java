@@ -1,4 +1,3 @@
-
 /*
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +14,10 @@
 package org.tomitribe.activemq.util;
 
 import java.io.File;
+import java.io.IOException;
 import java.lang.IllegalStateException;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.logging.Logger;
 import javax.jms.Connection;
@@ -32,6 +34,13 @@ import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.store.PersistenceAdapter;
 import org.apache.activemq.store.kahadb.KahaDBPersistenceAdapter;
+import org.apache.activemq.store.kahadb.data.KahaAddMessageCommand;
+import org.apache.activemq.store.kahadb.data.KahaEntryType;
+import org.apache.activemq.store.kahadb.data.KahaRemoveMessageCommand;
+import org.apache.activemq.store.kahadb.disk.journal.Journal;
+import org.apache.activemq.store.kahadb.disk.journal.Location;
+import org.apache.activemq.store.kahadb.disk.util.DataByteArrayInputStream;
+import org.apache.activemq.util.ByteSequence;
 import org.tomitribe.crest.api.Command;
 import org.tomitribe.crest.api.Option;
 import org.tomitribe.crest.api.Required;
@@ -129,6 +138,101 @@ public class KahaDbUtil {
         localConnection.close();
 
         broker.stop();
+    }
+
+    @Command("find-unconsumed-messages")
+    public void findUnconsumedMessages(
+            final @Option("kahaDB") @Required File kahaDB) throws Throwable {
+
+        final Map<String, MessageInfo> unconsumedMessages = new HashMap<>();
+
+        int journalSize = getJournalSize(kahaDB);
+        final Journal journal = createJournal(kahaDB, journalSize);
+
+        log.info("Starting journal...");
+        journal.start();
+
+        log.info("Reading journal...");
+        int fileIndex = 0;
+        int dataIndex = 0;
+        File lastFile = null;
+        int messages = 0;
+
+        Location location = journal.getNextLocation(null);
+        while (location != null) {
+            File nextFile = journal.getFile(location.getDataFileId());
+            if(lastFile == null || !lastFile.equals(nextFile)) {
+
+                lastFile = nextFile;
+                dataIndex = 1;
+                ++fileIndex;
+
+                log.info("Reading new journal file: " + fileIndex);
+            }
+            else {
+                ++dataIndex;
+            }
+
+            ByteSequence sequence = journal.read(location);
+            DataByteArrayInputStream sequenceDataStream = new DataByteArrayInputStream(sequence);
+            KahaEntryType commandType = KahaEntryType.valueOf(sequenceDataStream.readByte());
+            if (KahaEntryType.KAHA_ADD_MESSAGE_COMMAND.equals(commandType)) {
+                final KahaAddMessageCommand addMessageCommand = (KahaAddMessageCommand) commandType.createMessage().mergeFramed(sequenceDataStream);
+                final String destination = addMessageCommand.getDestination().toString();
+                final String messageId = addMessageCommand.getMessageId();
+                unconsumedMessages.put(messageId, new MessageInfo(destination, messageId, location));
+                messages++;
+            }
+            if (KahaEntryType.KAHA_REMOVE_MESSAGE_COMMAND.equals(commandType)) {
+                final KahaRemoveMessageCommand removeMessageCommand = (KahaRemoveMessageCommand) commandType.createMessage().mergeFramed(sequenceDataStream);
+                final String messageId = removeMessageCommand.getMessageId();
+                unconsumedMessages.remove(messageId);
+                messages--;
+            }
+
+            location = journal.getNextLocation(location);
+        }
+
+        log.info("Messages: " + messages);
+        log.info("Unconsumed messages: " + unconsumedMessages.size());
+        log.info("Closing journal...");
+        journal.close();
+    }
+
+    public static Journal createJournal(File directory, int journalSize) {
+        Journal result = new Journal();
+
+        result.setDirectory(directory);
+        result.setMaxFileLength(journalSize);
+        result.setCheckForCorruptionOnStartup(false);
+        result.setChecksum(false);
+        result.setWriteBatchSize(Journal.DEFAULT_MAX_WRITE_BATCH_SIZE);
+        result.setArchiveDataLogs(false);
+
+        return result;
+    }
+
+    public static int getJournalSize(File directory) {
+        Journal journal = new Journal();
+        journal.setDirectory(directory);
+
+        int journalSize = Journal.DEFAULT_MAX_FILE_LENGTH;
+        try {
+            journal.start();
+            Location location = journal.getNextLocation(null);
+            if(location != null) {
+                journalSize = (int)journal.getFile(location.getDataFileId()).length();
+            }
+        }
+        catch (Throwable throwable) {
+        }
+        finally {
+            try {
+                journal.close();
+            } catch (IOException e) {  }
+        }
+
+        return journalSize;
     }
 }
 
