@@ -141,8 +141,8 @@ public class KahaDbUtil {
     }
 
     @Command("find-unconsumed-messages")
-    public void findUnconsumedMessages(
-            final @Option("kahaDB") @Required File kahaDB) throws Throwable {
+    public DatabaseInfo findUnconsumedMessages(
+            final @Option("kahaDB") @Required File kahaDB) throws Exception {
 
         final Map<String, MessageInfo> unconsumedMessages = new HashMap<>();
 
@@ -176,6 +176,9 @@ public class KahaDbUtil {
             ByteSequence sequence = journal.read(location);
             DataByteArrayInputStream sequenceDataStream = new DataByteArrayInputStream(sequence);
             KahaEntryType commandType = KahaEntryType.valueOf(sequenceDataStream.readByte());
+
+            log.finest("Command type " + commandType.toString() + " found at location " + location);
+
             if (KahaEntryType.KAHA_ADD_MESSAGE_COMMAND.equals(commandType)) {
                 final KahaAddMessageCommand addMessageCommand = (KahaAddMessageCommand) commandType.createMessage().mergeFramed(sequenceDataStream);
                 final String destination = addMessageCommand.getDestination().toString();
@@ -187,7 +190,6 @@ public class KahaDbUtil {
                 final KahaRemoveMessageCommand removeMessageCommand = (KahaRemoveMessageCommand) commandType.createMessage().mergeFramed(sequenceDataStream);
                 final String messageId = removeMessageCommand.getMessageId();
                 unconsumedMessages.remove(messageId);
-                messages--;
             }
 
             location = journal.getNextLocation(location);
@@ -197,7 +199,11 @@ public class KahaDbUtil {
         log.info("Unconsumed messages: " + unconsumedMessages.size());
         log.info("Closing journal...");
         journal.close();
+
+        return new DatabaseInfo(messages, unconsumedMessages);
     }
+
+    // @Command - browser
 
     public static Journal createJournal(File directory, int journalSize) {
         Journal result = new Journal();
@@ -234,5 +240,6 @@ public class KahaDbUtil {
 
         return journalSize;
     }
+
 }
 
