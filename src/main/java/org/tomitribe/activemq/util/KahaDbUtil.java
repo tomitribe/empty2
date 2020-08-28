@@ -15,9 +15,10 @@ package org.tomitribe.activemq.util;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.PrintWriter;
 import java.lang.IllegalStateException;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.function.BiConsumer;
 import java.util.logging.Logger;
 import javax.jms.Connection;
@@ -35,6 +36,7 @@ import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.store.PersistenceAdapter;
 import org.apache.activemq.store.kahadb.KahaDBPersistenceAdapter;
 import org.apache.activemq.store.kahadb.data.KahaAddMessageCommand;
+import org.apache.activemq.store.kahadb.data.KahaDestination;
 import org.apache.activemq.store.kahadb.data.KahaEntryType;
 import org.apache.activemq.store.kahadb.data.KahaRemoveMessageCommand;
 import org.apache.activemq.store.kahadb.disk.journal.Journal;
@@ -44,6 +46,7 @@ import org.apache.activemq.util.ByteSequence;
 import org.tomitribe.crest.api.Command;
 import org.tomitribe.crest.api.Option;
 import org.tomitribe.crest.api.Required;
+import org.tomitribe.crest.api.StreamingOutput;
 import org.tomitribe.util.IO;
 
 public class KahaDbUtil {
@@ -141,20 +144,55 @@ public class KahaDbUtil {
     }
 
     @Command("find-unconsumed-messages")
-    public DatabaseInfo findUnconsumedMessages(
-            final @Option("kahaDB") @Required File kahaDB) throws Exception {
+    public StreamingOutput findUnconsumedMessages(final @Option("kahaDB") @Required File kahaDB) throws Exception {
+        return outputStream -> {
+            final PrintWriter pw = new PrintWriter(outputStream);
 
+            final DatabaseInfo databaseInfo = getDatabaseInfo(kahaDB);
+            pw.println("Messages: " + databaseInfo.getTotalMessageCount());
+            pw.println("Unconsumed messages: " + databaseInfo.getUnconsumedMessages().size());
+            pw.println("---");
+            pw.flush();
+
+            final List<MessageInfo> messageInfos = new ArrayList<>(databaseInfo.getUnconsumedMessages().values());
+            Collections.sort(messageInfos, (o1, o2) -> {
+                final Location l1 = o1.getLocation();
+                final Location l2 = o2.getLocation();
+
+                if (l1 == null || l2 == null) throw new NullPointerException("Location cannot be null");
+
+                if (l1.getDataFileId() == l2.getDataFileId()) {
+                    return Integer.compare(l1.getOffset(), l2.getOffset());
+                }
+
+                return Integer.compare(l1.getDataFileId(), l2.getDataFileId());
+            });
+
+            int lastFile = 0;
+
+            for (final MessageInfo messageInfo : messageInfos) {
+                if (messageInfo.getLocation().getDataFileId() != lastFile) {
+                    lastFile = messageInfo.getLocation().getDataFileId();
+                    pw.println("\nUnconsumed messages found in: db-" + lastFile + ".log");
+                }
+
+                pw.println(">> [" + messageInfo.getDestination() + "] " + messageInfo.getMessageId());
+                pw.flush();
+            }
+        };
+    }
+
+    DatabaseInfo getDatabaseInfo(final File kahaDB) throws IOException {
         final Map<String, MessageInfo> unconsumedMessages = new HashMap<>();
 
         int journalSize = getJournalSize(kahaDB);
         final Journal journal = createJournal(kahaDB, journalSize);
 
-        log.info("Starting journal...");
+        log.finest("Starting journal...");
         journal.start();
 
-        log.info("Reading journal...");
+        log.finest("Reading journal...");
         int fileIndex = 0;
-        int dataIndex = 0;
         File lastFile = null;
         int messages = 0;
 
@@ -162,15 +200,10 @@ public class KahaDbUtil {
         while (location != null) {
             File nextFile = journal.getFile(location.getDataFileId());
             if(lastFile == null || !lastFile.equals(nextFile)) {
-
                 lastFile = nextFile;
-                dataIndex = 1;
                 ++fileIndex;
 
-                log.info("Reading new journal file: " + fileIndex);
-            }
-            else {
-                ++dataIndex;
+                log.finest("Reading journal file: " + fileIndex);
             }
 
             ByteSequence sequence = journal.read(location);
@@ -181,7 +214,7 @@ public class KahaDbUtil {
 
             if (KahaEntryType.KAHA_ADD_MESSAGE_COMMAND.equals(commandType)) {
                 final KahaAddMessageCommand addMessageCommand = (KahaAddMessageCommand) commandType.createMessage().mergeFramed(sequenceDataStream);
-                final String destination = addMessageCommand.getDestination().toString();
+                final String destination = formatName(addMessageCommand.getDestination());
                 final String messageId = addMessageCommand.getMessageId();
                 unconsumedMessages.put(messageId, new MessageInfo(destination, messageId, location));
                 messages++;
@@ -195,18 +228,18 @@ public class KahaDbUtil {
             location = journal.getNextLocation(location);
         }
 
-        log.info("Messages: " + messages);
-        log.info("Unconsumed messages: " + unconsumedMessages.size());
-        log.info("Closing journal...");
+        log.finest("Closing journal...");
         journal.close();
 
         return new DatabaseInfo(messages, unconsumedMessages);
     }
 
-    // @Command - browser
+    private String formatName(KahaDestination dest) {
+        return dest.getType().toString() + ":" + dest.getName();
+    }
 
     public static Journal createJournal(File directory, int journalSize) {
-        Journal result = new Journal();
+        final Journal result = new Journal();
 
         result.setDirectory(directory);
         result.setMaxFileLength(journalSize);

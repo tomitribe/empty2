@@ -100,7 +100,7 @@ public class KahaDbUtilTest {
 
         // run the KahaDBUtil method
 
-        final DatabaseInfo databaseInfo = new KahaDbUtil().findUnconsumedMessages(kahadb);
+        final DatabaseInfo databaseInfo = new KahaDbUtil().getDatabaseInfo(kahadb);
 
         // check that we have a total of 10 messages
         Assert.assertEquals(10, databaseInfo.getTotalMessageCount());
