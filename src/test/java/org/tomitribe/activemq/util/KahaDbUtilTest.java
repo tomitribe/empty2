@@ -20,6 +20,9 @@ import javax.jms.Queue;
 import javax.jms.Session;
 import javax.jms.TextMessage;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -82,7 +85,6 @@ public class KahaDbUtilTest {
         Assert.assertEquals("Test message", messages.get(0));
     }
 
-
     @Test
     public void testFindUnconsumedMessagesInASingleQueue() throws Exception {
         final File kahadb = Files.tmpdir(true);
@@ -119,6 +121,53 @@ public class KahaDbUtilTest {
         Assert.assertEquals(5, offsets.size());
     }
 
+    @Test
+    public void testCreateAReallyTerribleKahaDB() throws Exception {
+        // use 1MB log files, 2 queues
+
+        final File kahadb = Files.tmpdir(true);
+
+        // create a broker
+        final BrokerService broker = createBroker(kahadb, 1024 * 1024);
+
+        // add 10x 1k messages to queue 1
+        produceMessagesOnQueue(broker.getVmConnectorURI().toString(), "QUEUE1", 10, 1024);
+
+        // add 1500 1k messages to queue 2
+        produceMessagesOnQueue(broker.getVmConnectorURI().toString(), "QUEUE2", 1500, 1024);
+
+        // the journal should have rolled over
+
+        // repeat
+        // add 10x 1k messages to queue 1
+        produceMessagesOnQueue(broker.getVmConnectorURI().toString(), "QUEUE1", 10, 1024);
+
+        // add 1500 1k messages to queue 2
+        produceMessagesOnQueue(broker.getVmConnectorURI().toString(), "QUEUE2", 1500, 1024);
+
+        // we should rollover again
+
+        // consume everything from queue 2
+        consumeMessagesFromQueue(broker.getVmConnectorURI().toString(), "QUEUE2", 3000);
+
+        // we now have 20x 1k messages occupying a the whole db
+        // the db should have grown (not shrunk) following the consumption
+
+        // run the test to find the unconsumed messages
+        final DatabaseInfo databaseInfo = new KahaDbUtil().getDatabaseInfo(kahadb);
+
+        // check that there are 20 unconsumed messages
+        Assert.assertEquals(20, databaseInfo.getUnconsumedMessages().size());
+    }
+
+    // similar test with topics and durable subscribers
+
+    // similar test with unfinished transactions
+
+    // similar with remove destination
+
+    // similar with prepare/rollback
+
     private void consumeMessagesFromQueue(final String brokerUrl, final String queueName, final int numberOfMessages) throws Exception {
         final ConnectionFactory cf = new ActiveMQConnectionFactory(brokerUrl);
         final Connection conn = cf.createConnection();
@@ -140,6 +189,10 @@ public class KahaDbUtilTest {
     }
 
     private void produceMessagesOnQueue(final String brokerUrl, final String queueName, final int numberOfMessages) throws Exception {
+        produceMessagesOnQueue(brokerUrl, queueName, numberOfMessages, 0);
+    }
+
+    private void produceMessagesOnQueue(final String brokerUrl, final String queueName, final int numberOfMessages, int messageSize) throws Exception {
         final ConnectionFactory cf = new ActiveMQConnectionFactory(brokerUrl);
         final Connection conn = cf.createConnection();
         conn.start();
@@ -150,7 +203,14 @@ public class KahaDbUtilTest {
         final MessageProducer producer = session.createProducer(queue);
 
         for (int i = 0; i < numberOfMessages; i++) {
-            final TextMessage message = session.createTextMessage("Test message: " + i);
+            final String messageText;
+            if (messageSize < 1) {
+                messageText = "Test message: " + i;
+            } else {
+                messageText = readInputStream(getClass().getResourceAsStream("demo.txt"), messageSize, i);
+            }
+
+            final TextMessage message = session.createTextMessage(messageText);
             message.setIntProperty("messageno", i);
             producer.send(message);
         }
@@ -160,16 +220,42 @@ public class KahaDbUtilTest {
         conn.close();
     }
 
+    private String readInputStream(InputStream is, int size, int messageNumber) throws IOException {
+        InputStreamReader reader = new InputStreamReader(is);
+        try {
+            char[] buffer;
+            if (size > 0) {
+                buffer = new char[size];
+            } else {
+                buffer = new char[1024];
+            }
+            int count;
+            StringBuilder builder = new StringBuilder();
+            while ((count = reader.read(buffer)) != -1) {
+                builder.append(buffer, 0, count);
+                if (size > 0) break;
+            }
+            return builder.toString();
+        } finally {
+            reader.close();
+        }
+    }
+
     private void stopBroker(BrokerService broker) throws Exception {
         broker.stop();
     }
 
     private BrokerService createBroker(final File kahadb) throws Exception {
+        return createBroker(kahadb, 32 * 1024 * 1024);
+    }
+
+    private BrokerService createBroker(final File kahadb, final int logSize) throws Exception {
         final BrokerService broker = new BrokerService();
         broker.setUseJmx(false);
 
-        final PersistenceAdapter persistenceAdapter = new KahaDBPersistenceAdapter();
+        final KahaDBPersistenceAdapter persistenceAdapter = new KahaDBPersistenceAdapter();
         persistenceAdapter.setDirectory(kahadb);
+        persistenceAdapter.setJournalMaxFileLength(logSize);
         broker.setPersistenceAdapter(persistenceAdapter);
         broker.start();
 
@@ -177,30 +263,6 @@ public class KahaDbUtilTest {
     }
 
 
-    public void testCreateAReallyTerribleKahaDB() throws Exception {
-        // use 1MB log files, 2 queues
 
-        // add 10x 1k messages to queue 1
-        // add 1500 1k messages to queue 2
-
-        // the journal should have rolled over
-        // repeat
-        // we should rollover again
-
-        // consume everything from queue 2
-        // we now have 20x 1k messages occupying a the whole db
-        // the db should have grown (not shrunk) following the consumption
-
-        // run the test to find the unconsumed messages
-        // assert that we get the right data
-    }
-
-    // similar test with topics and durable subscribers
-
-    // similar test with unfinished transactions
-
-    // similar with remove destination
-
-    // similar with prepare/rollback
 
 }
